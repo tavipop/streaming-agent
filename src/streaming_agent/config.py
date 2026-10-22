@@ -1,0 +1,48 @@
+"""Configuration, loaded from environment variables (and .env if present)."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from typing import cast, get_args
+
+from claude_agent_sdk import PermissionMode
+from dotenv import load_dotenv
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful, concise assistant. Use the tools available to you when they help "
+    "answer the user's question.\n\n"
+    "When asked for geopolitical news: call search_geopolitical_news (several focused queries "
+    "if useful), group the articles into distinct events, then call validate_news_events and "
+    "fix any errors it reports. Reply with ONLY the validated JSON array of objects with "
+    "event_date, event_summary, details and references - no prose, no code fences."
+)
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    model: str = "claude-sonnet-5-5"
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    max_turns: int = 20
+    # Built-in Claude Code tools the agent may use without asking. Custom tools from
+    # tools.py are added automatically. Keep this list tight; widen it deliberately.
+    allowed_tools: list[str] = field(default_factory=lambda: ["Read", "Glob", "Grep"])
+    permission_mode: PermissionMode = "default"
+    # Record prompts, model output and tool I/O in traces (metadata only when False).
+    trace_content: bool = False
+
+    @classmethod
+    def from_env(cls) -> AgentConfig:
+        load_dotenv()
+        defaults = cls()
+        mode = os.getenv("AGENT_PERMISSION_MODE", defaults.permission_mode)
+        valid = get_args(PermissionMode)
+        if mode not in valid:
+            raise ValueError(f"AGENT_PERMISSION_MODE must be one of {valid}, got {mode!r}")
+        return cls(
+            model=os.getenv("AGENT_MODEL", defaults.model),
+            system_prompt=os.getenv("AGENT_SYSTEM_PROMPT", defaults.system_prompt),
+            max_turns=int(os.getenv("AGENT_MAX_TURNS", str(defaults.max_turns))),
+            permission_mode=cast(PermissionMode, mode),
+            trace_content=os.getenv("AGENT_TRACE_CONTENT", "0") == "1",
+        )
