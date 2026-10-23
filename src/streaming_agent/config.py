@@ -30,6 +30,12 @@ class AgentConfig:
     permission_mode: PermissionMode = "default"
     # Record prompts, model output and tool I/O in traces (metadata only when False).
     trace_content: bool = False
+    # REST API (server.py): session lifetime/limits, per-turn timeout and accepted API keys
+    # (empty = auth off, local dev only).
+    session_ttl_s: float = 1800.0
+    max_sessions: int = 20
+    turn_timeout_s: float = 300.0
+    api_keys: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> AgentConfig:
@@ -45,4 +51,10 @@ class AgentConfig:
             max_turns=int(os.getenv("AGENT_MAX_TURNS", str(defaults.max_turns))),
             permission_mode=cast(PermissionMode, mode),
             trace_content=os.getenv("AGENT_TRACE_CONTENT", "0") == "1",
+            session_ttl_s=float(os.getenv("AGENT_SESSION_TTL", str(defaults.session_ttl_s))),
+            max_sessions=int(os.getenv("AGENT_MAX_SESSIONS", str(defaults.max_sessions))),
+            turn_timeout_s=float(os.getenv("AGENT_TURN_TIMEOUT", str(defaults.turn_timeout_s))),
+            api_keys=frozenset(
+                k.strip() for k in os.getenv("AGENT_API_KEYS", "").split(",") if k.strip()
+            ),
         )

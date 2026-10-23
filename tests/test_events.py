@@ -4,6 +4,7 @@ from typing import Any
 from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock, ToolUseBlock
 
 from streaming_agent.events import (
+    LlmError,
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
@@ -55,4 +56,32 @@ async def test_full_turn_sequence() -> None:
         TextDelta("4"),
         ToolCallFinished("add", {"a": 2, "b": 2}),
         TurnFinished(is_error=False, num_turns=1, cost_usd=0.001, session_id="s"),
+    ]
+
+
+async def test_errors_are_surfaced() -> None:
+    async def fake_stream() -> AsyncIterator[Any]:
+        yield AssistantMessage(content=[], model="m", error="rate_limit")
+        yield ResultMessage(
+            subtype="error_during_execution",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=True,
+            num_turns=1,
+            session_id="s",
+            result="API Error: 429",
+            api_error_status=429,
+        )
+
+    events = [e async for e in to_agent_events(fake_stream())]
+    assert events == [
+        LlmError("rate_limit"),
+        TurnFinished(
+            is_error=True,
+            num_turns=1,
+            cost_usd=None,
+            session_id="s",
+            result="API Error: 429",
+            error_detail="error_during_execution (API status 429)",
+        ),
     ]

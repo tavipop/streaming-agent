@@ -24,6 +24,12 @@ streaming (`include_partial_messages=True`).
   (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `AGENT_TRACE_CONSOLE=1`); `AGENT_TRACE_CONTENT=1` records content.
   Local UI: `./build.sh phoenix`.
 - `src/streaming_agent/cli.py` – terminal REPL; only renders `AgentEvent`s
+- `src/streaming_agent/server.py` – FastAPI REST front end (`./build.sh run_api`, docs at `/docs`):
+  `POST /sessions`, `POST /sessions/{id}/messages` (JSON `ChatResponse` envelope with `message`/`error`/
+  `error_source`, or SSE with `Accept: text/event-stream`), `DELETE /sessions/{id}`. Auth via `X-API-Key`
+  against `AGENT_API_KEYS` (unset = off). Also `AGENT_API_HOST/PORT`, `AGENT_CORS_ORIGINS`.
+- `src/streaming_agent/sessions.py` – `SessionManager`: one `StreamingAgent` (= one CLI process) per session;
+  `AGENT_MAX_SESSIONS`, `AGENT_SESSION_TTL` (idle reaper), `AGENT_TURN_TIMEOUT`. Failed turns discard the session.
 - `tests/` – offline unit tests; `test_agent_live.py` is marked `live`
 
 ## Conventions

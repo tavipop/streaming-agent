@@ -35,9 +35,18 @@ class TurnFinished:
     num_turns: int
     cost_usd: float | None
     session_id: str
+    result: str | None = None  # final answer text (ResultMessage.result)
+    error_detail: str | None = None  # why the turn failed, when is_error
 
 
-AgentEvent = TextDelta | ToolCallStarted | ToolCallFinished | TurnFinished
+@dataclass(frozen=True)
+class LlmError:
+    """The model API call failed (rate_limit, authentication_failed, server_error, ...)."""
+
+    kind: str
+
+
+AgentEvent = TextDelta | ToolCallStarted | ToolCallFinished | TurnFinished | LlmError
 
 
 def from_stream_event(raw: dict[str, Any]) -> AgentEvent | None:
@@ -62,6 +71,8 @@ async def to_agent_events(messages: AsyncIterator[Any]) -> AsyncIterator[AgentEv
             if ev is not None:
                 yield ev
         elif isinstance(msg, AssistantMessage):
+            if msg.error is not None:
+                yield LlmError(msg.error)
             # Text already arrived as deltas; surface completed tool calls with full input.
             for block in msg.content:
                 if isinstance(block, ToolUseBlock):
@@ -72,4 +83,12 @@ async def to_agent_events(messages: AsyncIterator[Any]) -> AsyncIterator[AgentEv
                 num_turns=msg.num_turns,
                 cost_usd=msg.total_cost_usd,
                 session_id=msg.session_id,
+                result=msg.result,
+                error_detail=_error_detail(msg) if msg.is_error else None,
             )
+
+
+def _error_detail(msg: ResultMessage) -> str:
+    if msg.api_error_status is not None:
+        return f"{msg.subtype} (API status {msg.api_error_status})"
+    return msg.subtype

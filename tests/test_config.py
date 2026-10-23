@@ -29,3 +29,15 @@ def test_trace_content_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert AgentConfig.from_env().trace_content is False
     monkeypatch.setenv("AGENT_TRACE_CONTENT", "1")
     assert AgentConfig.from_env().trace_content is True
+
+
+def test_api_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENT_API_KEYS", raising=False)
+    assert AgentConfig.from_env().api_keys == frozenset()
+    monkeypatch.setenv("AGENT_API_KEYS", " k1, k2 ,,")
+    monkeypatch.setenv("AGENT_MAX_SESSIONS", "3")
+    monkeypatch.setenv("AGENT_TURN_TIMEOUT", "12.5")
+    monkeypatch.setenv("AGENT_SESSION_TTL", "60")
+    cfg = AgentConfig.from_env()
+    assert cfg.api_keys == frozenset({"k1", "k2"})
+    assert (cfg.max_sessions, cfg.turn_timeout_s, cfg.session_ttl_s) == (3, 12.5, 60.0)

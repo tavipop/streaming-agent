@@ -11,6 +11,7 @@ from streaming_agent.agent import StreamingAgent
 from streaming_agent.config import AgentConfig
 from streaming_agent.events import (
     AgentEvent,
+    LlmError,
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
@@ -29,6 +30,8 @@ def render(event: AgentEvent) -> None:
             sys.stdout.write(f"\n{DIM}→ calling {name}…{RESET}")
         case ToolCallFinished(name, args):
             sys.stdout.write(f"\n{DIM}✓ {name}({args}){RESET}\n")
+        case LlmError(kind):
+            sys.stdout.write(f"\n{DIM}! model error: {kind}{RESET}\n")
         case TurnFinished(is_error, turns, cost, _):
             status = "error" if is_error else "done"
             cost_s = f", ${cost:.4f}" if cost is not None else ""

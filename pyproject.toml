@@ -6,15 +6,18 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "claude-agent-sdk>=0.2",
+    "fastapi>=0.161.1",
     "httpx>=0.27",
     "opentelemetry-api>=1.45.1",
     "opentelemetry-exporter-otlp-proto-http>=1.45.1",
     "opentelemetry-sdk>=1.45.1",
     "python-dotenv>=1.0",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
 streaming-agent = "streaming_agent.cli:main"
+streaming-agent-api = "streaming_agent.server:main"
 
 [dependency-groups]
 dev = [
