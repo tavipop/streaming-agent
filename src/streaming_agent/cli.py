@@ -33,7 +33,10 @@ def render(event: AgentEvent) -> None:
         case LlmError(kind):
             sys.stdout.write(f"\n{DIM}! model error: {kind}{RESET}\n")
         case TurnFinished(is_error, turns, cost, _):
-            status = "error" if is_error else "done"
+            if event.max_turns_reached:
+                status = "stopped: reached max turns"
+            else:
+                status = "error" if is_error else "done"
             cost_s = f", ${cost:.4f}" if cost is not None else ""
             sys.stdout.write(f"\n{DIM}[{status} · {turns} turn(s){cost_s}]{RESET}\n")
     sys.stdout.flush()

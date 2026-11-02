@@ -45,6 +45,7 @@ from streaming_agent.sessions import Session, SessionLimitError, SessionManager,
 log = logging.getLogger(__name__)
 
 ErrorSource = Literal["llm", "backend", "client"]
+StopReason = Literal["max_turns"]
 
 
 # ---- wire models ----------------------------------------------------------------------
@@ -64,6 +65,8 @@ class ChatResponse(BaseModel):
     tool_calls: list[ToolCall] = []
     num_turns: int | None = None
     cost_usd: float | None = None
+    # Why the reply stopped early (null when it completed normally).
+    stop_reason: StopReason | None = None
 
 
 class ChatRequest(BaseModel):
@@ -119,12 +122,18 @@ class TurnSummary:
             case TurnFinished():
                 self.finished = event
 
-    def to_response(self, session_id: str) -> tuple[int, ChatResponse]:
+    def to_response(self, session_id: str, max_turns: int) -> tuple[int, ChatResponse]:
         base = ChatResponse(session_id=session_id, tool_calls=self.tool_calls)
         done = self.finished
         if done is not None:
             base.num_turns = done.num_turns
             base.cost_usd = done.cost_usd
+        if done is not None and done.max_turns_reached and not self.llm_errors:
+            # Graceful stop: return what the agent produced before hitting the limit.
+            partial = done.result or "".join(self.text)
+            base.message = partial or f"Stopped after reaching the maximum of {max_turns} turns."
+            base.stop_reason = "max_turns"
+            return 200, base
         if self.llm_errors or (done is not None and done.is_error):
             details = [*self.llm_errors]
             if done is not None and done.error_detail:
@@ -298,7 +307,7 @@ def create_app(
             except Exception as exc:
                 status, response = failed(session, exc)
             else:
-                status, response = summary.to_response(session.id)
+                status, response = summary.to_response(session.id, config.max_turns)
             sessions.touch(session)
         return JSONResponse(response.model_dump(), status_code=status)
 
@@ -317,7 +326,7 @@ def create_app(
                             yield sse("text", {"text": text})
                         case ToolCallFinished(name, args):
                             yield sse("tool_call", {"name": name, "input": args})
-                _, response = summary.to_response(session.id)
+                _, response = summary.to_response(session.id, config.max_turns)
                 completed = True
             except Exception as exc:
                 _, response = failed(session, exc)

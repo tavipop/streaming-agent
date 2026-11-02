@@ -85,3 +85,45 @@ async def test_errors_are_surfaced() -> None:
             error_detail="error_during_execution (API status 429)",
         ),
     ]
+
+
+def _result(subtype: str, *, is_error: bool, terminal_reason: str | None = None) -> ResultMessage:
+    return ResultMessage(
+        subtype=subtype,
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=is_error,
+        num_turns=3,
+        session_id="s",
+        terminal_reason=terminal_reason,
+    )
+
+
+async def _finished(msg: ResultMessage) -> TurnFinished:
+    async def fake_stream() -> AsyncIterator[Any]:
+        yield msg
+
+    (event,) = [e async for e in to_agent_events(fake_stream())]
+    assert isinstance(event, TurnFinished)
+    return event
+
+
+async def test_max_turns_subtype_is_flagged() -> None:
+    event = await _finished(_result("error_max_turns", is_error=True))
+    assert event.max_turns_reached is True
+    assert event.num_turns == 3
+
+
+async def test_max_turns_terminal_reason_is_flagged() -> None:
+    event = await _finished(_result("success", is_error=True, terminal_reason="max_turns"))
+    assert event.max_turns_reached is True
+
+
+async def test_normal_completion_is_not_flagged_as_max_turns() -> None:
+    event = await _finished(_result("success", is_error=False, terminal_reason="completed"))
+    assert event.max_turns_reached is False
+
+
+async def test_other_errors_are_not_flagged_as_max_turns() -> None:
+    event = await _finished(_result("error_during_execution", is_error=True))
+    assert event.max_turns_reached is False

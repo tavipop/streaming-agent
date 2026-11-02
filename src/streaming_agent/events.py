@@ -37,6 +37,7 @@ class TurnFinished:
     session_id: str
     result: str | None = None  # final answer text (ResultMessage.result)
     error_detail: str | None = None  # why the turn failed, when is_error
+    max_turns_reached: bool = False  # the agent loop hit AgentConfig.max_turns
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,13 @@ async def to_agent_events(messages: AsyncIterator[Any]) -> AsyncIterator[AgentEv
                 session_id=msg.session_id,
                 result=msg.result,
                 error_detail=_error_detail(msg) if msg.is_error else None,
+                max_turns_reached=is_max_turns(msg),
             )
+
+
+def is_max_turns(msg: ResultMessage) -> bool:
+    """True when the turn stopped because the agent loop reached its max_turns limit."""
+    return msg.subtype == "error_max_turns" or msg.terminal_reason == "max_turns"
 
 
 def _error_detail(msg: ResultMessage) -> str:

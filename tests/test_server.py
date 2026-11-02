@@ -90,6 +90,7 @@ async def test_happy_path() -> None:
     body = _envelope(r)
     assert body.message == "It is 5."
     assert body.error is False and body.error_source is None
+    assert body.stop_reason is None
     assert [(t.name, t.input) for t in body.tool_calls] == [
         ("mcp__agent_tools__add", {"a": 2, "b": 3})
     ]
@@ -118,7 +119,10 @@ async def test_multi_turn_reuses_session_agent() -> None:
 @pytest.mark.parametrize(
     ("events", "detail"),
     [
-        ([_done(result=None, is_error=True, error_detail="error_max_turns")], "error_max_turns"),
+        (
+            [_done(result=None, is_error=True, error_detail="error_during_execution")],
+            "error_during_execution",
+        ),
         ([LlmError("rate_limit"), _done(result="API Error")], "rate_limit"),
     ],
 )
@@ -254,3 +258,106 @@ async def test_sse_reports_backend_error_in_result() -> None:
     assert name == "result"
     assert data["error"] is True and data["error_source"] == "backend"
     assert len(h.manager) == 0
+
+
+def _max_turns_done() -> TurnFinished:
+    return _done(
+        result=None,
+        is_error=True,
+        error_detail="error_max_turns",
+        max_turns_reached=True,
+        num_turns=4,
+    )
+
+
+async def capped_with_text(prompt: str) -> AsyncIterator[AgentEvent]:
+    yield TextDelta("Searching. ")
+    yield ToolCallFinished("mcp__agent_tools__add", {"a": 1, "b": 1})
+    yield TextDelta("Still working")
+    yield _max_turns_done()
+
+
+async def capped_without_text(prompt: str) -> AsyncIterator[AgentEvent]:
+    yield ToolCallFinished("mcp__agent_tools__add", {"a": 1, "b": 1})
+    yield _max_turns_done()
+
+
+async def test_max_turns_returns_partial_text_as_success() -> None:
+    h = Harness(capped_with_text, max_turns=3)
+    r = await h.send(await h.session())
+    assert r.status_code == 200
+    body = _envelope(r)
+    assert body.error is False and body.error_source is None and body.error_detail is None
+    assert body.message == "Searching. Still working"
+    assert body.stop_reason == "max_turns"
+    assert body.num_turns == 4
+    assert [t.name for t in body.tool_calls] == ["mcp__agent_tools__add"]
+
+
+async def test_max_turns_without_text_returns_fallback_notice() -> None:
+    h = Harness(capped_without_text, max_turns=3)
+    body = _envelope(await h.send(await h.session()))
+    assert body.message == "Stopped after reaching the maximum of 3 turns."
+    assert body.stop_reason == "max_turns"
+    assert body.error is False
+
+
+async def test_max_turns_keeps_session_usable() -> None:
+    scripts = iter([capped_with_text, happy])
+    h = Harness(lambda p: next(scripts)(p), max_turns=3)
+    sid = await h.session()
+    assert (await h.send(sid)).status_code == 200
+    r = await h.send(sid)
+    assert r.status_code == 200
+    body = _envelope(r)
+    assert body.message == "It is 5." and body.stop_reason is None
+    assert len(h.agents) == 1 and len(h.manager) == 1
+
+
+async def test_max_turns_with_model_error_is_still_an_llm_error() -> None:
+    async def script(prompt: str) -> AsyncIterator[AgentEvent]:
+        yield LlmError("server_error")
+        yield _max_turns_done()
+
+    h = Harness(script, max_turns=3)
+    r = await h.send(await h.session())
+    assert r.status_code == 502
+    assert _envelope(r).error_source == "llm"
+
+
+async def test_sse_max_turns_result() -> None:
+    h = Harness(capped_with_text, max_turns=3)
+    sid = await h.session()
+    r = await h.send(sid, headers={"Accept": "text/event-stream"})
+    assert r.status_code == 200
+    events = _parse_sse(r.text)
+    assert [name for name, _ in events] == ["text", "tool_call", "text", "result"]
+    final = ChatResponse.model_validate(events[-1][1])
+    assert final.error is False and final.error_source is None
+    assert final.message == "Searching. Still working"
+    assert final.stop_reason == "max_turns"
+    assert len(h.manager) == 1
+
+
+async def test_sse_max_turns_fallback_notice() -> None:
+    h = Harness(capped_without_text, max_turns=7)
+    r = await h.send(await h.session(), headers={"Accept": "text/event-stream"})
+    final = ChatResponse.model_validate(_parse_sse(r.text)[-1][1])
+    assert final.message == "Stopped after reaching the maximum of 7 turns."
+    assert final.stop_reason == "max_turns"
+
+
+async def test_sse_max_turns_keeps_session_usable() -> None:
+    scripts = iter([capped_with_text, happy])
+    h = Harness(lambda p: next(scripts)(p), max_turns=3)
+    sid = await h.session()
+    sse_headers = {"Accept": "text/event-stream"}
+    first = ChatResponse.model_validate(
+        _parse_sse((await h.send(sid, headers=sse_headers)).text)[-1][1]
+    )
+    assert first.stop_reason == "max_turns"
+    r = await h.send(sid, headers=sse_headers)
+    assert r.status_code == 200
+    second = ChatResponse.model_validate(_parse_sse(r.text)[-1][1])
+    assert second.error is False and second.message == "It is 5." and second.stop_reason is None
+    assert len(h.agents) == 1 and len(h.manager) == 1

@@ -58,6 +58,7 @@ class StreamingAgent:
             trace.get_tracer(__name__),
             model=self.config.model,
             record_content=self.config.trace_content,
+            max_turns=self.config.max_turns,
         )
         turn.start(prompt)
         try:

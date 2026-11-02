@@ -48,7 +48,7 @@ class AgentConfig:
         return cls(
             model=os.getenv("AGENT_MODEL", defaults.model),
             system_prompt=os.getenv("AGENT_SYSTEM_PROMPT", defaults.system_prompt),
-            max_turns=int(os.getenv("AGENT_MAX_TURNS", str(defaults.max_turns))),
+            max_turns=_positive_int("AGENT_MAX_TURNS", defaults.max_turns),
             permission_mode=cast(PermissionMode, mode),
             trace_content=os.getenv("AGENT_TRACE_CONTENT", "0") == "1",
             session_ttl_s=float(os.getenv("AGENT_SESSION_TTL", str(defaults.session_ttl_s))),
@@ -58,3 +58,14 @@ class AgentConfig:
                 k.strip() for k in os.getenv("AGENT_API_KEYS", "").split(",") if k.strip()
             ),
         )
+
+
+def _positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value

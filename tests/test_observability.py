@@ -27,7 +27,9 @@ def exporter() -> InMemorySpanExporter:
     return InMemorySpanExporter()
 
 
-def _tracer(exporter: InMemorySpanExporter, *, content: bool = False) -> TurnTracer:
+def _tracer(
+    exporter: InMemorySpanExporter, *, content: bool = False, max_turns: int | None = None
+) -> TurnTracer:
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     ticks: Iterator[int] = iter(range(1_000, 1_000_000, 1_000))
@@ -35,6 +37,7 @@ def _tracer(exporter: InMemorySpanExporter, *, content: bool = False) -> TurnTra
         provider.get_tracer("test"),
         model=MODEL,
         record_content=content,
+        max_turns=max_turns,
         clock=lambda: next(ticks),
     )
 
@@ -226,3 +229,73 @@ def test_tracing_target_prefers_otlp_endpoint(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     assert observability.tracing_target() == "console"
+
+
+def _max_turns_result(**kw: Any) -> ResultMessage:
+    args: dict[str, Any] = {
+        "subtype": "error_max_turns",
+        "duration_ms": 10,
+        "duration_api_ms": 5,
+        "is_error": True,
+        "num_turns": 4,
+        "session_id": "s1",
+        "terminal_reason": "max_turns",
+    }
+    return ResultMessage(**(args | kw))
+
+
+def test_max_turns_reached_is_traced_without_error(exporter: InMemorySpanExporter) -> None:
+    _run(_tracer(exporter, max_turns=3), [_max_turns_result()])
+    (turn,) = _by_name(exporter)["agent.turn"]
+    attrs = turn.attributes or {}
+    assert attrs["agent.max_turns"] == 3
+    assert attrs["agent.max_turns_reached"] is True
+    assert turn.status.status_code != StatusCode.ERROR
+
+
+def test_normal_turn_is_not_flagged_as_max_turns(exporter: InMemorySpanExporter) -> None:
+    _run(_tracer(exporter, max_turns=3), _turn_messages())
+    attrs = _by_name(exporter)["agent.turn"][0].attributes or {}
+    assert attrs["agent.max_turns_reached"] is False
+
+
+def test_max_turns_content_not_recorded_by_default(exporter: InMemorySpanExporter) -> None:
+    _run(_tracer(exporter, max_turns=3), [_max_turns_result(result="partial answer")])
+    attrs = _by_name(exporter)["agent.turn"][0].attributes or {}
+    assert "output.value" not in attrs
+
+
+def test_model_error_with_max_turns_sets_error_status(exporter: InMemorySpanExporter) -> None:
+    _run(
+        _tracer(exporter, max_turns=3),
+        [AssistantMessage(content=[], model=MODEL, error="server_error"), _max_turns_result()],
+    )
+    (turn,) = _by_name(exporter)["agent.turn"]
+    assert turn.status.status_code == StatusCode.ERROR
+    assert "server_error" in (turn.status.description or "")
+    assert (turn.attributes or {})["agent.max_turns_reached"] is True
+
+
+def test_model_error_without_error_result_sets_error_status(
+    exporter: InMemorySpanExporter,
+) -> None:
+    _run(
+        _tracer(exporter),
+        [AssistantMessage(content=[], model=MODEL, error="rate_limit"), *_turn_messages()[-1:]],
+    )
+    (turn,) = _by_name(exporter)["agent.turn"]
+    assert turn.status.status_code == StatusCode.ERROR
+
+
+def test_max_turns_content_recorded_when_enabled(exporter: InMemorySpanExporter) -> None:
+    _run(_tracer(exporter, content=True, max_turns=3), [_max_turns_result(result="partial")])
+    attrs = _by_name(exporter)["agent.turn"][0].attributes or {}
+    assert attrs["output.value"] == "partial"
+
+
+def test_error_result_without_max_turns_sets_error_status(exporter: InMemorySpanExporter) -> None:
+    result = _max_turns_result(subtype="error_during_execution", terminal_reason=None)
+    _run(_tracer(exporter, max_turns=3), [result])
+    (turn,) = _by_name(exporter)["agent.turn"]
+    assert turn.status.status_code == StatusCode.ERROR
+    assert turn.status.description == "error_during_execution"

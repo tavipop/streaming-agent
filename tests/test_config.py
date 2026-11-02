@@ -41,3 +41,20 @@ def test_api_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = AgentConfig.from_env()
     assert cfg.api_keys == frozenset({"k1", "k2"})
     assert (cfg.max_sessions, cfg.turn_timeout_s, cfg.session_ttl_s) == (3, 12.5, 60.0)
+
+
+def test_max_turns_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("streaming_agent.config.load_dotenv", lambda: False)  # ignore local .env
+    monkeypatch.delenv("AGENT_MAX_TURNS", raising=False)
+    assert AgentConfig.from_env().max_turns == 20
+
+
+def test_max_turns_is_passed_to_sdk() -> None:
+    assert build_options(AgentConfig(max_turns=5)).max_turns == 5
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-1", "2.5", ""])
+def test_invalid_max_turns_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AGENT_MAX_TURNS", value)
+    with pytest.raises(ValueError, match=rf"AGENT_MAX_TURNS.*{value!r}"):
+        AgentConfig.from_env()
