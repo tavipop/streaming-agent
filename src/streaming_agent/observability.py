@@ -38,6 +38,9 @@ from opentelemetry.sdk.trace.export import (
 )
 from opentelemetry.trace import Span, Status, StatusCode
 
+from streaming_agent import graph
+from streaming_agent.events import is_max_turns
+
 CONTENT_LIMIT = 4000
 _ENDPOINT_VARS = ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT")
 
@@ -92,16 +95,20 @@ class TurnTracer:
         *,
         model: str,
         record_content: bool = False,
+        max_turns: int | None = None,
         clock: Callable[[], int] = time.time_ns,
     ) -> None:
         self._tracer = tracer
         self._model = model
         self._record_content = record_content
+        self._max_turns = max_turns
         self._clock = clock
         self._turn: Span | None = None
         # Keyed by parent_tool_use_id: None is the main agent, anything else a subagent.
         self._llm: dict[str | None, _LlmCall] = {}
         self._tools: dict[str, Span] = {}
+        self._tool_names: dict[str, str] = {}  # tool_use_id -> tool name, while running
+        self._model_errors: list[str] = []  # AssistantMessage.error kinds seen this turn
 
     def start(self, prompt: str) -> None:
         self._turn = self._tracer.start_span(
@@ -109,6 +116,8 @@ class TurnTracer:
             start_time=self._clock(),
             attributes={"openinference.span.kind": "CHAIN", "gen_ai.request.model": self._model},
         )
+        if self._max_turns is not None:
+            self._turn.set_attribute("agent.max_turns", self._max_turns)
         if self._record_content:
             self._turn.set_attribute("input.value", truncate(prompt))
 
@@ -122,6 +131,8 @@ class TurnTracer:
         if isinstance(msg, StreamEvent):
             self._on_stream_event(msg.event, msg.parent_tool_use_id)
         elif isinstance(msg, AssistantMessage):
+            if msg.error is not None:
+                self._model_errors.append(msg.error)
             for block in msg.content:
                 if isinstance(block, ToolUseBlock):
                     self._start_tool(block, msg.parent_tool_use_id)
@@ -142,6 +153,7 @@ class TurnTracer:
             span.end(end_time=now)
         self._llm.clear()
         self._tools.clear()
+        self._tool_names.clear()
         if self._turn is None:
             return
         if error is not None:
@@ -213,11 +225,16 @@ class TurnTracer:
         if self._record_content:
             span.set_attribute("input.value", truncate(block.input))
         self._tools[block.id] = span
+        self._tool_names[block.id] = block.name
 
     def _end_tool(self, block: ToolResultBlock) -> None:
         span = self._tools.pop(block.tool_use_id, None)
+        name = self._tool_names.pop(block.tool_use_id, "")
         if span is None:
             return
+        if name.rpartition("__")[2] in graph.TOOL_NAMES:
+            # Metadata only (row count, duration, error class); rows go in output.value below.
+            span.set_attributes(graph.result_attributes(block.content))
         if block.is_error:
             span.set_status(Status(StatusCode.ERROR, "tool returned an error"))
         if self._record_content and block.content is not None:
@@ -227,18 +244,22 @@ class TurnTracer:
     def _on_result(self, msg: ResultMessage) -> None:
         if self._turn is None:
             return
+        max_turns_reached = is_max_turns(msg)
         attrs: dict[str, Any] = {
             "session.id": msg.session_id,
             "agent.num_turns": msg.num_turns,
             "agent.duration_ms": msg.duration_ms,
             "agent.duration_api_ms": msg.duration_api_ms,
             "agent.is_error": msg.is_error,
+            "agent.max_turns_reached": max_turns_reached,
         }
         if msg.total_cost_usd is not None:
             attrs["agent.cost_usd"] = msg.total_cost_usd
         self._turn.set_attributes(attrs)
         _set_usage(self._turn, msg.usage or {})
-        if msg.is_error:
+        if self._model_errors:  # a failed model call is an error even if the cap was also hit
+            self._turn.set_status(Status(StatusCode.ERROR, ", ".join(self._model_errors)))
+        elif msg.is_error and not max_turns_reached:  # hitting the limit alone is graceful
             self._turn.set_status(Status(StatusCode.ERROR, msg.subtype))
         if self._record_content and msg.result is not None:
             self._turn.set_attribute("output.value", truncate(msg.result))

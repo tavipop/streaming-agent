@@ -17,3 +17,7 @@ htmlcov/
 # Claude Code: personal overrides stay local
 .claude/settings.local.json
 CLAUDE.local.md
+
+# OS / IDE
+.DS_Store
+.idea/

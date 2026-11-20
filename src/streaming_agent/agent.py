@@ -9,20 +9,24 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from opentelemetry import trace
 
-from streaming_agent import tools
+from streaming_agent import graph, tools
 from streaming_agent.config import AgentConfig
 from streaming_agent.events import AgentEvent, to_agent_events
 from streaming_agent.observability import TurnTracer
 
 
 def build_options(config: AgentConfig) -> ClaudeAgentOptions:
+    enabled = tools.enabled_tools(config)
+    system_prompt = config.system_prompt
+    if config.graph_enabled:
+        system_prompt += "\n\n" + graph.prompt_guidance(config.graph_max_rows)
     return ClaudeAgentOptions(
         model=config.model,
-        system_prompt=config.system_prompt,
+        system_prompt=system_prompt,
         max_turns=config.max_turns,
         permission_mode=config.permission_mode,
-        mcp_servers={tools.SERVER_NAME: tools.build_server()},
-        allowed_tools=[*config.allowed_tools, *tools.allowed_tool_names()],
+        mcp_servers={tools.SERVER_NAME: tools.build_server(enabled)},
+        allowed_tools=[*config.allowed_tools, *tools.allowed_tool_names(enabled)],
         include_partial_messages=True,  # <- token-level streaming
         setting_sources=[],  # don't inherit this repo's .claude/ settings at runtime
     )
@@ -58,6 +62,7 @@ class StreamingAgent:
             trace.get_tracer(__name__),
             model=self.config.model,
             record_content=self.config.trace_content,
+            max_turns=self.config.max_turns,
         )
         turn.start(prompt)
         try:
