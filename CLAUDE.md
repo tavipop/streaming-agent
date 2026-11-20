@@ -4,7 +4,7 @@ A Python agent built on the **Claude Agent SDK** (`claude-agent-sdk`) with token
 streaming (`include_partial_messages=True`).
 
 > **Terminology.** "The agent" / "runtime agent" means the product in `src/streaming_agent/`.
-> "Developer" and "QA" mean the Claude Code subagents in `.claude/agents/` that build it.
+> "Developer", "reviewer" and "QA" mean the Claude Code subagents in `.claude/agents/` that build it.
 > They never load at runtime because `build_options()` sets `setting_sources=[]`.
 
 ## Commands (always via uv)
@@ -17,7 +17,7 @@ streaming (`include_partial_messages=True`).
 - Live API test: `uv run pytest -m live` (needs `ANTHROPIC_API_KEY`)
 - Lint + format (auto-fix, for development): `uv run ruff check --fix . && uv run ruff format .`
 - Type check: `uv run mypy`
-- Everything: `/check`
+- Gates 1–6, check-only: `/check` (`/check fix` auto-fixes lint/format first)
 
 ## Layout
 
@@ -44,7 +44,12 @@ streaming (`include_partial_messages=True`).
 - `src/streaming_agent/sessions.py` – `SessionManager`: one `StreamingAgent` (= one CLI process) per session;
   `AGENT_MAX_SESSIONS`, `AGENT_SESSION_TTL` (idle reaper), `AGENT_TURN_TIMEOUT`. Failed turns discard the session.
 - `tests/` – offline unit tests; `test_agent_live.py` is marked `live`
-- `.claude/agents/` – `developer.md`, `qa.md` (development workflow, see below)
+- `.claude/agents/` – `developer.md`, `reviewer.md`, `qa.md` (development workflow, see below), plus
+  `sdk-reviewer.md` (SDK-specific review) and `test-writer.md`
+- `.claude/commands/` – `/feature` (full workflow), `/open-pr` (commit, push, open/update PR), `/check` (gates 1–6), …
+- `.github/` – `workflows/ci.yml` (gate 1–6 commands on every PR and push to `main`, see Quality gates),
+  `workflows/claude-code-review.yml` (Claude review on PRs), `workflows/claude.yml` (`@claude` mentions),
+  `pull_request_template.md`
 
 ## Conventions
 
@@ -82,30 +87,84 @@ so a gate reports the true state. `/check` must run this same set.
 | 7 | Live test         | `uv run pytest -m live`                                        | Pass, **only when** the change touches `agent.py`, `build_options()`, `events.py`, or `tools.py` **and** `ANTHROPIC_API_KEY` is already set in the environment. Otherwise report "not run" with the reason. |
 | 8 | Functional QA     | `qa` subagent                                                  | Verdict = PASS |
 
+CI (`.github/workflows/ci.yml`) runs the gate 1–5 commands and the gate 6 command with `--cov-fail-under=85` on every
+PR and push to `main`. CI enforces only the 85% floor. The rest of gate 6 ("no drop", "new/changed code covered") is
+checked locally: developer reports coverage against the baseline, and reviewer checks that report. Gates 7–8 are local only.
+
 Never skip, `xfail`, or delete tests, add `# noqa` / `# type: ignore`, lower thresholds, or edit ruff/mypy/pytest
 config to get green without explicit user approval. If a gate already fails on `main` without your change, report it
 rather than working around it.
 
-## Development workflow (developer → QA)
+## Development workflow (developer → review → QA → PR)
 
-Two subagents live in `.claude/agents/`:
+Subagents in `.claude/agents/`:
 
 - **developer** evaluates the requirement, returns clarification questions, implements with tests, and runs every quality gate.
+- **reviewer** does a read-only code review of the diff against the requirement and these conventions
+  (`APPROVE` / `CHANGES_REQUESTED`). **sdk-reviewer** adds an SDK-specific review when the change touches
+  `agent.py`, `build_options()`, `events.py` or `tools.py`.
 - **qa** independently verifies each acceptance criterion against real behaviour. It never edits `src/` or `tests/`.
 
 The main session orchestrates:
 
-1. Start every feature or bug fix by delegating to **developer** with the full requirement text.
-2. Subagents can't talk to the user. When developer returns `CLARIFICATIONS NEEDED`, ask the user
+1. Check the working tree. On `main` with changes, ask the user first. On this requirement's own feature branch,
+   resume: its changes are in-progress work, and developer is told so. On any other branch (clean or not), ask the
+   user whether to switch to `main` and branch from there or to continue on the current branch.
+2. Delegate to **developer** with the full requirement text, Phases 1–2 only (analysis and plan, no file edits).
+   The plan-only reply lists the ACs, files to change, tests per AC, live-gate applicability, risks, and the
+   proposed Conventional Commit type/scope and branch slug.
+3. Subagents can't talk to the user. When developer returns `CLARIFICATIONS NEEDED`, ask the user
    those questions (AskUserQuestion when the options are clear), then resume developer with the answers.
    Never answer on the user's behalf.
-3. Invoke **qa** only after developer reports `READY_FOR_QA` with gates 1–7 green (or 7 justified as not run).
-4. Give qa the original requirement, the agreed clarifications, and developer's change list, not developer's
-   opinion of correctness.
-5. On QA `FAIL`, pass the defect list to developer verbatim and repeat. After 3 failed rounds, stop and report to the user.
-6. Finish with: decisions made, files changed, gate table, QA verdict, open risks.
+4. Once nothing blocking is open and before any file is changed, create the feature branch if on `main`
+   (see "Pull requests"), using the slug and type from the plan. Then resume developer to implement.
+5. After developer reports `READY_FOR_QA` with gates 1–7 green (or 7 justified as not run), invoke **reviewer**
+   (and **sdk-reviewer** when applicable) with the requirement, clarifications, developer's change list and gate table.
+   Review passes only if reviewer returns `APPROVE` **and** sdk-reviewer (when run) reports no findings.
+   sdk-reviewer has no verdict, and its checklist only covers correctness, SDK misuse, tool safety and missing
+   offline tests, so every sdk-reviewer finding is blocking. Pass blocking findings to developer verbatim and
+   repeat. Developer may rebut a finding with evidence; the reviewer re-checks it.
+6. Invoke **qa** only after review passes. Give qa the original requirement, the agreed clarifications, and
+   developer's change list, not developer's or reviewers' opinion of correctness.
+7. On QA `FAIL`, pass the defect list to developer verbatim, then repeat review and QA. Review and QA rejections share
+   one cap: after 3 failed rounds in total, stop and report to the user. No PR is opened.
+8. When QA is `PASS` and gates 1–8 are green (gate 7 may be NOT RUN with a justified reason), run `/open-pr` (see "Pull requests").
+9. Finish with: decisions made, files changed, gate table, review verdict, QA verdict, PR URL, open risks.
 
 Shortcut: `/feature <requirement>` runs this loop.
+
+## Pull requests
+
+`/open-pr` is the only route by which Claude commits, pushes and opens PRs. It runs as the last `/feature` step,
+or standalone when the user asks.
+
+- **Precondition**: every gate green (gate 7 may be NOT RUN with a justified reason), review passed (workflow
+  step 5), QA `PASS`, evidenced by the `/feature` summary, or standalone by a fresh `/check` plus the user's
+  explicit review/QA outcome. Otherwise no commit, push or PR.
+- **Branch**: `<type>/<kebab-slug>`, plus the ticket id when there is one (`feat/item-3-graph-row-cap`).
+  `<type>` is one of `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`. Never commit or push to `main`
+  directly (`.claude/hooks/block_push_to_main.py` blocks pushes to protected branches).
+- **Commits**: [Conventional Commits](https://www.conventionalcommits.org/), e.g. `feat(graph): cap query rows`.
+  The subject is imperative and ≤ 72 chars; the body says why; then the attribution trailer. Stage explicit paths only
+  (never `git add -A`), never `.env*`, `tmp/` or untracked files unrelated to the change.
+- **Attribution**: if the session gives attribution lines for commits and PRs (system instructions), use those
+  verbatim. They take precedence because they name the exact model. Otherwise use these defaults:
+  commit trailer `Co-Authored-By: Claude <noreply@anthropic.com>`; PR body footer
+  `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+- **Confirmation**: before anything is written, show the user the mode (create PR / update PR / local commit only
+  when `gh` or `origin` is unavailable), branch, commit message, file list, and PR title/body, and ask once.
+  If the user declines, change nothing.
+- **PR**: ready for review, base `main`, title = commit subject, body from `.github/pull_request_template.md`
+  with every section filled in (summary, AC → tests, clarifications, changes, quality gates 1–8, review verdict,
+  QA verdict, decisions & risks, manual verification), ending with the attribution footer. Label by type (`feat` → `enhancement`, `fix` → `bug`, `docs` → `documentation`), assignee `@me`,
+  no reviewers requested. If an open PR exists for the branch, push and update its body/comment instead of
+  creating a duplicate.
+- **Failures**: if `gh` isn't authenticated, `origin` is missing, or push/PR creation fails, stop without
+  retrying, keep the local branch and commit, and report the exact manual commands.
+- **After opening**: CI (gate 1–6 commands, 85% coverage floor) and the Claude Code Review workflow run on the PR. Merging is the user's call.
+- **Recommended repo setting** (not managed from here): protect `main` with the required status check
+  `quality-gates` (GitHub matches it by the CI job name; it is shown as "CI / quality-gates" in the PR UI) and at
+  least one approving review.
 
 ### Requirement format (recommended)
 
@@ -124,7 +183,8 @@ If acceptance criteria are missing, developer derives them and gets them confirm
 
 ## Guardrails
 
-- Don't commit or push unless the user asks. <!-- TODO: branch / commit message convention -->
+- Don't commit, push or open PRs unless the user asks or confirms the `/open-pr` step; follow "Pull requests"
+  for branch and commit conventions.
 - Stay in the requirement's scope; note unrelated issues instead of fixing them.
 - Don't add dependencies without saying why in the summary (`uv add` / `uv add --dev`, never hand-edit the lockfile).
 

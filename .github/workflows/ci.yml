@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quality-gates:
+    # Gate 1–6 commands from CLAUDE.md; coverage enforces only the 85% floor.
+    # "No drop" / new-code coverage, gate 7 (live) and gate 8 (QA) are checked locally.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: "Gate 1: Lockfile"
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: "Gate 2: Format"
+        run: uv run ruff format --check .
+
+      - name: "Gate 3: Lint"
+        run: uv run ruff check .
+
+      - name: "Gate 4: Types"
+        run: uv run mypy
+
+      - name: "Gates 5 + 6: Unit tests and coverage"
+        run: uv run pytest --cov=streaming_agent --cov-report=term-missing --cov-fail-under=85
