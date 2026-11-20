@@ -25,7 +25,14 @@ streaming (`include_partial_messages=True`).
   `AGENT_MAX_TURNS` (default 20, positive int) caps agent-loop turns per user message.
 - `src/streaming_agent/agent.py` – `StreamingAgent` wraps `ClaudeSDKClient`; `build_options()` is the single place SDK options are set
 - `src/streaming_agent/events.py` – pure mapping: raw SDK messages → `AgentEvent` (`TextDelta`, `ToolCallStarted`, `ToolCallFinished`, `TurnFinished`)
-- `src/streaming_agent/tools.py` – custom tools (`@tool`) served via an in-process MCP server
+- `src/streaming_agent/tools.py` – custom tools (`@tool`) served via an in-process MCP server;
+  `enabled_tools(config)` adds the graph tools `graph_schema` / `graph_query` only when `NEO4J_URI` is set
+- `src/streaming_agent/graph.py` – Neo4j retail-graph RAG (no SDK types): `GraphClient` wraps
+  `langchain_neo4j.Neo4jGraph` (lazy connect on first use, one per process, READ session), read-only
+  Cypher validation, row capping, system-prompt guidance, span attributes. Settings: `NEO4J_URI`
+  (unset = graph off), `NEO4J_USERNAME` (default `neo4j`), `NEO4J_PASSWORD`, `NEO4J_DATABASE`
+  (default `neo4j`), `AGENT_GRAPH_QUERY_TIMEOUT` (default 10 s), `AGENT_GRAPH_MAX_ROWS` (default 50).
+  The DB must already exist, hold the data and have APOC (needed for the schema).
 - `src/streaming_agent/observability.py` – OpenTelemetry tracing: `TurnTracer` builds turn / `chat` /
   `execute_tool` spans from the SDK message stream; `setup_tracing()` picks the exporter from env
   (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `AGENT_TRACE_CONSOLE=1`); `AGENT_TRACE_CONTENT=1` records content.

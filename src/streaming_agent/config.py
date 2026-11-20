@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import cast, get_args
@@ -36,6 +37,17 @@ class AgentConfig:
     max_sessions: int = 20
     turn_timeout_s: float = 300.0
     api_keys: frozenset[str] = frozenset()
+    # Neo4j retail graph (graph.py). neo4j_uri=None disables the graph tools entirely.
+    neo4j_uri: str | None = None
+    neo4j_username: str = "neo4j"
+    neo4j_password: str = field(default="", repr=False)
+    neo4j_database: str = "neo4j"
+    graph_query_timeout_s: float = 10.0
+    graph_max_rows: int = 50
+
+    @property
+    def graph_enabled(self) -> bool:
+        return self.neo4j_uri is not None
 
     @classmethod
     def from_env(cls) -> AgentConfig:
@@ -57,7 +69,26 @@ class AgentConfig:
             api_keys=frozenset(
                 k.strip() for k in os.getenv("AGENT_API_KEYS", "").split(",") if k.strip()
             ),
+            neo4j_uri=os.getenv("NEO4J_URI", "").strip() or None,
+            neo4j_username=os.getenv("NEO4J_USERNAME", defaults.neo4j_username),
+            neo4j_password=os.getenv("NEO4J_PASSWORD", defaults.neo4j_password),
+            neo4j_database=os.getenv("NEO4J_DATABASE", defaults.neo4j_database),
+            graph_query_timeout_s=_positive_float(
+                "AGENT_GRAPH_QUERY_TIMEOUT", defaults.graph_query_timeout_s
+            ),
+            graph_max_rows=_positive_int("AGENT_GRAPH_MAX_ROWS", defaults.graph_max_rows),
         )
+
+
+def _positive_float(name: str, default: float) -> float:
+    raw = os.getenv(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive number, got {raw!r}")
+    return value
 
 
 def _positive_int(name: str, default: int) -> int:

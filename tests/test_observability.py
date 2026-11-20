@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterator
 from typing import Any
 
@@ -16,7 +17,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-from streaming_agent import observability
+from streaming_agent import graph, observability
 from streaming_agent.observability import TurnTracer
 
 MODEL = "claude-sonnet-5-5"
@@ -299,3 +300,67 @@ def test_error_result_without_max_turns_sets_error_status(exporter: InMemorySpan
     (turn,) = _by_name(exporter)["agent.turn"]
     assert turn.status.status_code == StatusCode.ERROR
     assert turn.status.description == "error_during_execution"
+
+
+GRAPH_TOOL = "mcp__agent_tools__graph_query"
+CYPHER = "MATCH (c:Customer) RETURN c.email AS email LIMIT 1"
+
+
+def _graph_messages(result: dict[str, Any], is_error: bool = False) -> list[Any]:
+    tool_use = ToolUseBlock(id="g1", name=GRAPH_TOOL, input={"cypher": CYPHER})
+    return [
+        AssistantMessage(content=[tool_use], model=MODEL),
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id="g1",
+                    content=[{"type": "text", "text": json.dumps(result)}],
+                    is_error=is_error,
+                )
+            ]
+        ),
+    ]
+
+
+def test_graph_tool_span_has_row_count_and_duration(exporter: InMemorySpanExporter) -> None:
+    result = {**graph.shape_rows([{"email": "ana@example.com"}], 50), "duration_ms": 12.5}
+    _run(_tracer(exporter), _graph_messages(result))
+    (span,) = _by_name(exporter)[f"execute_tool {GRAPH_TOOL}"]
+    attrs = span.attributes or {}
+    assert attrs["db.system.name"] == "neo4j"
+    assert attrs["db.response.returned_rows"] == 1
+    assert attrs["agent.graph.duration_ms"] == 12.5
+    assert span.status.status_code != StatusCode.ERROR
+
+
+def test_graph_tool_span_has_error_class(exporter: InMemorySpanExporter) -> None:
+    result = {**graph.error_result("Invalid input", "CypherSyntaxError"), "duration_ms": 3.0}
+    _run(_tracer(exporter), _graph_messages(result, is_error=True))
+    (span,) = _by_name(exporter)[f"execute_tool {GRAPH_TOOL}"]
+    assert (span.attributes or {})["error.type"] == "CypherSyntaxError"
+    assert (span.attributes or {})["agent.graph.duration_ms"] == 3.0
+    assert span.status.status_code == StatusCode.ERROR
+
+
+def test_graph_cypher_and_rows_not_recorded_by_default(exporter: InMemorySpanExporter) -> None:
+    result = {**graph.shape_rows([{"email": "ana@example.com"}], 50), "duration_ms": 1.0}
+    _run(_tracer(exporter), _graph_messages(result))
+    for span in exporter.get_finished_spans():
+        recorded = json.dumps(dict(span.attributes or {}))
+        assert "ana@example.com" not in recorded
+        assert "MATCH" not in recorded
+
+
+def test_graph_cypher_and_rows_recorded_when_enabled(exporter: InMemorySpanExporter) -> None:
+    result = {**graph.shape_rows([{"email": "ana@example.com"}], 50), "duration_ms": 1.0}
+    _run(_tracer(exporter, content=True), _graph_messages(result))
+    (span,) = _by_name(exporter)[f"execute_tool {GRAPH_TOOL}"]
+    attrs = span.attributes or {}
+    assert CYPHER in str(attrs["input.value"])
+    assert "ana@example.com" in str(attrs["output.value"])
+
+
+def test_non_graph_tool_span_has_no_graph_attributes(exporter: InMemorySpanExporter) -> None:
+    _run(_tracer(exporter), _turn_messages())
+    (span,) = _by_name(exporter)["execute_tool mcp__agent_tools__add"]
+    assert "db.system.name" not in (span.attributes or {})

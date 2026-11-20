@@ -1,8 +1,11 @@
 import json
+from typing import Any
 
 import pytest
 
+from graph_fakes import SCHEMA, FakeGraph, fake_client
 from streaming_agent import news, tools
+from streaming_agent.config import AgentConfig
 
 
 async def test_add() -> None:
@@ -16,7 +19,7 @@ async def test_current_time_is_iso() -> None:
 
 
 def test_allowed_tool_names_are_namespaced() -> None:
-    names = tools.allowed_tool_names()
+    names = tools.allowed_tool_names(tools.TOOLS)
     assert f"mcp__{tools.SERVER_NAME}__add" in names
     assert len(names) == len(tools.TOOLS)
 
@@ -62,3 +65,59 @@ async def test_validate_news_events_ok_and_error() -> None:
 
     bad = await tools.validate_news_events.handler({"events": [{**event, "references": []}]})
     assert bad["is_error"] is True
+
+
+def _graph_tools(backend: FakeGraph) -> dict[str, Any]:
+    return {t.name: t for t in tools.graph_tools(fake_client(backend))}
+
+
+def test_graph_tools_disabled_without_neo4j_uri() -> None:
+    assert tools.enabled_tools(AgentConfig()) == tools.TOOLS
+
+
+def test_graph_tools_enabled_with_neo4j_uri() -> None:
+    enabled = tools.enabled_tools(AgentConfig(neo4j_uri="bolt://graph:7687"))
+    names = tools.allowed_tool_names(enabled)
+    assert names[: len(tools.TOOLS)] == tools.allowed_tool_names(tools.TOOLS)
+    assert names[len(tools.TOOLS) :] == [
+        "mcp__agent_tools__graph_schema",
+        "mcp__agent_tools__graph_query",
+    ]
+
+
+async def test_graph_schema_tool_returns_schema() -> None:
+    result = await _graph_tools(FakeGraph())["graph_schema"].handler({})
+    assert "is_error" not in result
+    assert json.loads(result["content"][0]["text"])["schema"] == SCHEMA
+
+
+async def test_graph_query_tool_returns_rows_as_json() -> None:
+    backend = FakeGraph(rows=[{"email": "ana@example.com"}])
+    result = await _graph_tools(backend)["graph_query"].handler(
+        {"cypher": "MATCH (c:Customer) RETURN c.email AS email LIMIT 1"}
+    )
+    assert "is_error" not in result
+    assert json.loads(result["content"][0]["text"])["rows"] == [{"email": "ana@example.com"}]
+
+
+async def test_graph_query_tool_flags_rejected_query_as_error() -> None:
+    result = await _graph_tools(FakeGraph())["graph_query"].handler(
+        {"cypher": "CREATE (c:Customer)"}
+    )
+    assert result["is_error"] is True
+    assert "read-only" in json.loads(result["content"][0]["text"])["error"]
+
+
+async def test_graph_query_tool_requires_string_cypher() -> None:
+    result = await _graph_tools(FakeGraph())["graph_query"].handler({"cypher": 42})
+    assert result["is_error"] is True
+    assert json.loads(result["content"][0]["text"])["error"] == "cypher must be a string"
+
+
+async def test_graph_query_tool_turns_unexpected_errors_into_results() -> None:
+    backend = FakeGraph(error=RuntimeError("Cannot perform operations - connection closed"))
+    result = await _graph_tools(backend)["graph_query"].handler(
+        {"cypher": "MATCH (c:Customer) RETURN c LIMIT 1"}
+    )
+    assert result["is_error"] is True
+    assert json.loads(result["content"][0]["text"])["error_class"] == "RuntimeError"

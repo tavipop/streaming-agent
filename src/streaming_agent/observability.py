@@ -38,6 +38,7 @@ from opentelemetry.sdk.trace.export import (
 )
 from opentelemetry.trace import Span, Status, StatusCode
 
+from streaming_agent import graph
 from streaming_agent.events import is_max_turns
 
 CONTENT_LIMIT = 4000
@@ -106,6 +107,7 @@ class TurnTracer:
         # Keyed by parent_tool_use_id: None is the main agent, anything else a subagent.
         self._llm: dict[str | None, _LlmCall] = {}
         self._tools: dict[str, Span] = {}
+        self._tool_names: dict[str, str] = {}  # tool_use_id -> tool name, while running
         self._model_errors: list[str] = []  # AssistantMessage.error kinds seen this turn
 
     def start(self, prompt: str) -> None:
@@ -151,6 +153,7 @@ class TurnTracer:
             span.end(end_time=now)
         self._llm.clear()
         self._tools.clear()
+        self._tool_names.clear()
         if self._turn is None:
             return
         if error is not None:
@@ -222,11 +225,16 @@ class TurnTracer:
         if self._record_content:
             span.set_attribute("input.value", truncate(block.input))
         self._tools[block.id] = span
+        self._tool_names[block.id] = block.name
 
     def _end_tool(self, block: ToolResultBlock) -> None:
         span = self._tools.pop(block.tool_use_id, None)
+        name = self._tool_names.pop(block.tool_use_id, "")
         if span is None:
             return
+        if name.rpartition("__")[2] in graph.TOOL_NAMES:
+            # Metadata only (row count, duration, error class); rows go in output.value below.
+            span.set_attributes(graph.result_attributes(block.content))
         if block.is_error:
             span.set_status(Status(StatusCode.ERROR, "tool returned an error"))
         if self._record_content and block.content is not None:
